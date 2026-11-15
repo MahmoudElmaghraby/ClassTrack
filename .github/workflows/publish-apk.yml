@@ -1,0 +1,67 @@
+name: Publish verified ClassTrack APK
+on:
+  push:
+    branches: [apk-delivery]
+    paths: [.github/workflows/publish-apk.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Reconstruct and verify the signed APK
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP"
+          python3 - <<'PYCODE'
+          import os, json, base64, hashlib, lzma, shutil, urllib.request
+          from concurrent.futures import ThreadPoolExecutor
+          from pathlib import Path
+          manifest = {'codec': 'xz', 'chunkSize': 2949120, 'compressedBytes': 22860916, 'apkBytes': 58758486, 'apkSha256': '00a7c20d8ae1f3118e4850de89fa3695441b9e5f996a3ffd9899dff5c0366ac9', 'parts': [{'index': 0, 'size': 2949120, 'sha': '14164c8dd91612974d10f8d3193e95bf2e9dde13'}, {'index': 1, 'size': 2949120, 'sha': 'ac7df84345168a87c090e8f75c178b9cc3916fb4'}, {'index': 2, 'size': 2949120, 'sha': '9aaf5350a2d0907ee5d6d69ac2549d56c50d5b4f'}, {'index': 3, 'size': 2949120, 'sha': '620be273c9db45e24ba6875b20326951f0f56717'}, {'index': 4, 'size': 2949120, 'sha': '4c3548efb8d60813a9062a16ac546f2b89c4590d'}, {'index': 5, 'size': 2949120, 'sha': 'f8cae9503764c9a3f94c2cabad21c7ee5d52172f'}, {'index': 6, 'size': 2949120, 'sha': '4f367919e370247493bc399085ce428dbcfab1ec'}, {'index': 7, 'size': 2217076, 'sha': '8b7c9582dfdaab8e6666460c6d058ca5a22b5d00'}]}
+
+          def download(part):
+              repo = os.environ['GH_REPO']
+              request = urllib.request.Request(
+                  f"https://api.github.com/repos/{repo}/git/blobs/{part['sha']}",
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                           'Accept': 'application/vnd.github+json',
+                           'User-Agent': 'ClassTrack-verified-delivery'})
+              with urllib.request.urlopen(request, timeout=90) as response:
+                  payload = json.load(response)
+              data = base64.b64decode(payload['content'])
+              assert len(data) == part['size'], 'Incomplete delivery part'
+              actual = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+              assert actual == part['sha'], 'Delivery part hash mismatch'
+              return data
+
+          with ThreadPoolExecutor(max_workers=4) as pool:
+              with open('ClassTrack.apk.xz', 'wb') as output:
+                  for data in pool.map(download, manifest['parts']):
+                      output.write(data)
+          assert Path('ClassTrack.apk.xz').stat().st_size == manifest['compressedBytes']
+          with lzma.open('ClassTrack.apk.xz', 'rb') as source, open('ClassTrack.apk', 'wb') as output:
+              shutil.copyfileobj(source, output)
+          assert Path('ClassTrack.apk').stat().st_size == manifest['apkBytes']
+          assert hashlib.sha256(Path('ClassTrack.apk').read_bytes()).hexdigest() == manifest['apkSha256']
+          print('Verified exact prebuilt ClassTrack.apk:', manifest['apkBytes'], 'bytes')
+          PYCODE
+      - name: Publish the verified APK download
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP"
+          if ! gh release view v1.0.0 >/dev/null 2>&1; then
+            gh release create v1.0.0 --target 5e3fe0dd9a1bae8e475e2e6e95bc04df1c80979f --title "ClassTrack 1.0.0" --notes "Android 7.0+ test build. Supports armeabi-v7a, arm64-v8a and x86_64. Exact prebuilt APK verified by SHA-256; real-device GPS testing remains required."
+          fi
+          if gh release view v1.0.0 --json assets --jq '.assets[].name' | grep -Fxq 'ClassTrack.apk'; then
+            mkdir -p existing
+            gh release download v1.0.0 --pattern ClassTrack.apk --dir existing
+            echo '00a7c20d8ae1f3118e4850de89fa3695441b9e5f996a3ffd9899dff5c0366ac9  existing/ClassTrack.apk' | sha256sum -c -
+          else
+            gh release upload v1.0.0 ClassTrack.apk
+          fi
+
