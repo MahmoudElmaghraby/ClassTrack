@@ -1,0 +1,109 @@
+rules_version = '2';
+service cloud.firestore {
+ match /databases/{database}/documents {
+  function signed() { return request.auth != null; }
+  function user() { return get(/databases/$(database)/documents/users/$(request.auth.uid)).data; }
+  function student() { return signed() && user().role == 'student'; }
+  function teacher() { return signed() && user().role == 'teacher'; }
+  function owns(c) { return teacher() && get(/databases/$(database)/documents/classes/$(c)).data.teacherID == request.auth.uid; }
+  function member(c, u) { return exists(/databases/$(database)/documents/enrollments/$(c + '__' + u)); }
+  function session(s) { return get(/databases/$(database)/documents/attendance_sessions/$(s)).data; }
+  function visible(s) { return signed() && (owns(s.classID) || (s.initialized && member(s.classID, request.auth.uid))); }
+  function text(v) { return v is string && v.size() > 0 && v.size() <= 1000; }
+  function num(v) { return v is int || v is float; }
+  function point(d) { return num(d.latitude) && num(d.longitude) && d.latitude >= -90 && d.latitude <= 90 && d.longitude >= -180 && d.longitude <= 180; }
+  function dist(d,s) { return latlng.value(d.latitude,d.longitude).distance(latlng.value(s.latitude,s.longitude)); }
+  function inside(d,s) { return point(d) && dist(d,s) <= s.radius; }
+  function timely(s) { return s.initialized && s.status == 'active' && request.time >= s.startTime && request.time < s.expiryTime; }
+  function choice(a) { return a is int && a >= 0 && a < 4; }
+  function answers(a) { return a is list && a.size() == 5 && choice(a[0]) && choice(a[1]) && choice(a[2]) && choice(a[3]) && choice(a[4]); }
+  function question(q) { return q.keys().hasOnly(['text','options']) && text(q.text) && q.options is list && q.options.size() == 4 && text(q.options[0]) && text(q.options[1]) && text(q.options[2]) && text(q.options[3]); }
+  function questions(q) { return q is list && q.size() == 5 && question(q[0]) && question(q[1]) && question(q[2]) && question(q[3]) && question(q[4]); }
+  function ready(id) { return questions(get(/databases/$(database)/documents/attendance_sessions/$(id)/quiz/public).data.questions) && answers(get(/databases/$(database)/documents/attendance_sessions/$(id)/quiz_private/key).data.correctAnswers); }
+  function score(a,s) {
+   let k = get(/databases/$(database)/documents/attendance_sessions/$(s)/quiz_private/key).data.correctAnswers;
+   return (a[0]==k[0]?1:0)+(a[1]==k[1]?1:0)+(a[2]==k[2]?1:0)+(a[3]==k[3]?1:0)+(a[4]==k[4]?1:0);
+  }
+  match /users/{uid} {
+   allow get: if signed() && uid == request.auth.uid;
+   allow create: if signed() && uid == request.auth.uid && request.resource.data.keys().hasOnly(['name','email','role','studentID','createdAt']) && text(request.resource.data.name) && request.resource.data.email == request.auth.token.email && request.resource.data.createdAt == request.time && (request.resource.data.role == 'teacher' || (request.resource.data.role == 'student' && text(request.resource.data.studentID)));
+   match /runtime/clock {
+    allow get: if signed() && uid == request.auth.uid;
+    allow create,update: if signed() && uid == request.auth.uid && request.resource.data.keys().hasOnly(['time']) && request.resource.data.time == request.time;
+   }
+  }
+  match /classes/{id} {
+   allow get,list: if signed() && (resource.data.teacherID == request.auth.uid || member(id,request.auth.uid));
+   allow create: if teacher() && request.resource.data.teacherID == request.auth.uid && request.resource.data.keys().hasOnly(['name','teacherID','semester','joinCode','createdAt']) && text(request.resource.data.name) && text(request.resource.data.semester) && request.resource.data.createdAt == request.time && getAfter(/databases/$(database)/documents/class_join_codes/$(request.resource.data.joinCode)).data.classID == id;
+   allow update: if owns(id) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name','semester']) && text(request.resource.data.name) && text(request.resource.data.semester);
+  }
+  match /class_join_codes/{code} {
+   allow get: if signed();
+   allow create: if teacher() && code.matches('^[A-Z2-9]{8}$') && request.resource.data.keys().hasOnly(['classID','teacherID','className']) && request.resource.data.teacherID == request.auth.uid && text(request.resource.data.className) && getAfter(/databases/$(database)/documents/classes/$(request.resource.data.classID)).data.teacherID == request.auth.uid && getAfter(/databases/$(database)/documents/classes/$(request.resource.data.classID)).data.joinCode == code;
+  }
+  match /enrollments/{id} {
+   allow get: if signed() && (!exists(/databases/$(database)/documents/enrollments/$(id)) || resource.data.studentID == request.auth.uid || owns(resource.data.classID));
+   allow list: if signed() && (resource.data.studentID == request.auth.uid || owns(resource.data.classID));
+   allow create: if student() && request.resource.data.keys().hasOnly(['classID','studentID','joinCodeUsed','studentName','universityStudentID','className','createdAt']) && request.resource.data.studentID == request.auth.uid && id == request.resource.data.classID+'__'+request.auth.uid && request.resource.data.createdAt == request.time && request.resource.data.studentName == user().name && request.resource.data.universityStudentID == user().studentID && get(/databases/$(database)/documents/class_join_codes/$(request.resource.data.joinCodeUsed)).data.classID == request.resource.data.classID && request.resource.data.className == get(/databases/$(database)/documents/class_join_codes/$(request.resource.data.joinCodeUsed)).data.className;
+  }
+  match /attendance_sessions/{id} {
+   allow get,list: if visible(resource.data);
+   allow create: if owns(request.resource.data.classID) && request.resource.data.keys().hasOnly(['classID','teacherID','mode','latitude','longitude','radius','startTime','expiryTime','status','initialized','createdAt']) && request.resource.data.teacherID == request.auth.uid && request.resource.data.mode in ['punch_in','quiz'] && point(request.resource.data) && num(request.resource.data.radius) && request.resource.data.radius > 0 && request.resource.data.radius / request.resource.data.radius == 1.0 && request.resource.data.startTime == null && request.resource.data.expiryTime == null && request.resource.data.status == 'closed' && request.resource.data.initialized == false && request.resource.data.createdAt == request.time;
+   allow update: if owns(resource.data.classID) && (
+    (!resource.data.initialized && request.resource.data.initialized == true && request.resource.data.status == 'active' && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['initialized','status','startTime','expiryTime']) && request.resource.data.startTime == get(/databases/$(database)/documents/session_clocks/$(id)).data.startedAt && request.resource.data.expiryTime == request.resource.data.startTime+duration.value(120,'s') && request.time < request.resource.data.expiryTime && (resource.data.mode != 'quiz' || ready(id))) ||
+    (resource.data.initialized && resource.data.status == 'active' && request.resource.data.status == 'closed' && request.time >= resource.data.expiryTime && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])));
+   match /quiz/public {
+    allow get: if visible(session(id));
+    allow create,update: if signed() && getAfter(/databases/$(database)/documents/attendance_sessions/$(id)).data.teacherID == request.auth.uid && !exists(/databases/$(database)/documents/session_clocks/$(id)) && request.resource.data.keys().hasOnly(['questions']) && questions(request.resource.data.questions);
+   }
+   match /quiz_private/key {
+    allow get: if signed() && session(id).teacherID == request.auth.uid;
+    allow create,update: if signed() && getAfter(/databases/$(database)/documents/attendance_sessions/$(id)).data.teacherID == request.auth.uid && !exists(/databases/$(database)/documents/session_clocks/$(id)) && request.resource.data.keys().hasOnly(['correctAnswers']) && answers(request.resource.data.correctAnswers);
+   }
+  }
+  match /session_clocks/{id} {
+   allow get: if signed() && resource.data.teacherID == request.auth.uid;
+   allow create: if signed() && session(id).teacherID == request.auth.uid && !session(id).initialized && request.resource.data.keys().hasOnly(['teacherID','classID','startedAt']) && request.resource.data.teacherID == request.auth.uid && request.resource.data.classID == session(id).classID && request.resource.data.startedAt == request.time && (session(id).mode != 'quiz' || ready(id));
+  }
+  function present(id) { return exists(/databases/$(database)/documents/attendance_records/$(id)) && get(/databases/$(database)/documents/attendance_records/$(id)).data.status == 'present'; }
+  function eventValid(d,id) {
+   let s = session(d.sessionID);
+   let duplicate = present(id);
+   let located = point(d);
+   let inRadius = inside(d,s);
+   let timeOK = timely(s);
+   let open = d.eventType == 'quiz_open';
+   return d.keys().hasAll(['studentID','sessionID','classID','timestamp','latitude','longitude','distance','locationVerified','quizOpened','quizSubmitted','submissionTime','answers','quizScore','gradedAt','status','rejectionReason','eventType','finalized']) && d.keys().hasOnly(['studentID','sessionID','classID','timestamp','latitude','longitude','distance','locationVerified','quizOpened','quizSubmitted','submissionTime','answers','quizScore','gradedAt','status','rejectionReason','eventType','finalized']) && student() && d.studentID == request.auth.uid && id == d.sessionID+'__'+request.auth.uid && d.classID == s.classID && s.initialized && member(s.classID,request.auth.uid) && d.timestamp == request.time &&
+    ((located && num(d.distance) && math.abs(d.distance-dist(d,s)) <= 1.0) || (!located && d.latitude == null && d.longitude == null && d.distance == null)) &&
+    d.locationVerified == inRadius && d.quizScore == null && d.gradedAt == null && d.quizOpened == (s.mode == 'quiz') && d.finalized == !open &&
+    ((s.mode == 'punch_in' && d.eventType == 'punch_in' && !d.quizSubmitted && d.answers == null && d.submissionTime == null) || (s.mode == 'quiz' && ((open && !d.quizSubmitted && d.answers == null && d.submissionTime == null) || (d.eventType == 'quiz_submit' && d.quizSubmitted && answers(d.answers) && d.submissionTime == request.time)))) &&
+    (duplicate ? (d.status == 'rejected' && d.rejectionReason == 'already_present') : !timeOK ? (d.status == 'rejected' && d.rejectionReason == 'expired') : !located ? (d.status == 'rejected' && d.rejectionReason in ['gps_unavailable','permission_denied']) : !inRadius ? (d.status == 'rejected' && d.rejectionReason == 'outside_radius') : (d.rejectionReason == null && d.status == (open?'absent':'present')));
+  }
+  function summaryValid(d,id) {
+   let e = getAfter(/databases/$(database)/documents/attendance_records/$(id)/attempts/$(d.lastAttemptId)).data;
+   return student() && d.studentID == request.auth.uid && id == d.sessionID+'__'+request.auth.uid && eventValid(e,id) && e.eventType != 'quiz_open' && d.diff(e).affectedKeys().hasOnly(['lastAttemptId']);
+  }
+  function gradeValid() {
+   let old = resource.data;
+   let d = request.resource.data;
+   return owns(old.classID) && old.quizSubmitted && old.quizScore == null && d.diff(old).affectedKeys().hasOnly(['quizScore','gradedAt']) && d.gradedAt == request.time && d.quizScore == score(old.answers,old.sessionID);
+  }
+  function absentValid(d,id) {
+   let s = session(d.sessionID);
+   return owns(s.classID) && s.initialized && request.time >= s.expiryTime && member(s.classID,d.studentID) && get(/databases/$(database)/documents/enrollments/$(s.classID+'__'+d.studentID)).data.createdAt <= s.expiryTime && id == d.sessionID+'__'+d.studentID && d.classID == s.classID && d.status == 'absent' && d.finalized && d.finalizedAt == request.time && d.timestamp == null && d.latitude == null && d.longitude == null && d.distance == null && d.locationVerified == false && d.quizOpened == false && d.quizSubmitted == false && d.submissionTime == null && d.answers == null && d.quizScore == null && d.gradedAt == null && d.rejectionReason == null && d.lastAttemptId == null && d.keys().hasOnly(['sessionID','studentID','classID','timestamp','latitude','longitude','distance','locationVerified','quizOpened','quizSubmitted','submissionTime','answers','quizScore','gradedAt','status','rejectionReason','finalized','finalizedAt','lastAttemptId']);
+  }
+  match /attendance_records/{id} {
+   allow get: if signed() && (!exists(/databases/$(database)/documents/attendance_records/$(id)) || resource.data.studentID == request.auth.uid || owns(resource.data.classID));
+   allow list: if signed() && (resource.data.studentID == request.auth.uid || owns(session(resource.data.sessionID).classID));
+   allow create: if summaryValid(request.resource.data,id) || absentValid(request.resource.data,id);
+   allow update: if gradeValid() || (resource.data.status != 'present' && summaryValid(request.resource.data,id));
+   match /attempts/{attemptID} {
+    allow create: if eventValid(request.resource.data,id) && (request.resource.data.eventType == 'quiz_open' || present(id) || getAfter(/databases/$(database)/documents/attendance_records/$(id)).data.lastAttemptId == attemptID);
+    allow update: if gradeValid();
+   }
+  }
+  match /{path=**}/attempts/{attemptID} {
+   allow get,list: if signed() && (resource.data.studentID == request.auth.uid || owns(resource.data.classID));
+  }
+ }
+}

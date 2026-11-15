@@ -1,0 +1,9 @@
+{
+  "indexes": [
+    {"collectionGroup":"attempts","queryScope":"COLLECTION_GROUP","fields":[
+      {"fieldPath":"classID","order":"ASCENDING"},
+      {"fieldPath":"sessionID","order":"ASCENDING"}
+    ]}
+  ],
+  "fieldOverrides": []
+}
