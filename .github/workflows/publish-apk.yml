@@ -13,13 +13,11 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-    defaults:
-      run:
-        working-directory: ${{ runner.temp }}
     steps:
       - name: Reconstruct and verify the signed APK
         shell: bash
         run: |
+          cd "$RUNNER_TEMP"
           python3 - <<'PYCODE'
           import os, json, base64, hashlib, lzma, shutil, urllib.request
           from concurrent.futures import ThreadPoolExecutor
@@ -55,6 +53,7 @@ jobs:
       - name: Publish the verified APK download
         shell: bash
         run: |
+          cd "$RUNNER_TEMP"
           if ! gh release view v1.0.0 >/dev/null 2>&1; then
             gh release create v1.0.0 --target 5e3fe0dd9a1bae8e475e2e6e95bc04df1c80979f --title "ClassTrack 1.0.0" --notes "Android 7.0+ test build. Supports armeabi-v7a, arm64-v8a and x86_64. Exact prebuilt APK verified by SHA-256; real-device GPS testing remains required."
           fi
@@ -65,3 +64,4 @@ jobs:
           else
             gh release upload v1.0.0 ClassTrack.apk
           fi
+
