@@ -1,0 +1,10 @@
+name: Publish verified Android APK
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo 'APK delivery payload is being prepared.'
